@@ -1,9 +1,10 @@
-using Netch.Models;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Threading.Tasks;
+using Netch.Models;
+using Serilog;
 
 namespace Netch.Utils
 {
@@ -13,10 +14,10 @@ namespace Netch.Utils
 
         public static async Task UpdateServersAsync(string? proxyServer = default)
         {
-            await Task.WhenAll(Global.Settings.SubscribeLink.Select(item => Task.Run(() => UpdateServer(item, proxyServer))).ToArray());
+            await Task.WhenAll(Global.Settings.SubscribeLink.Select(item => UpdateServerCoreAsync(item, proxyServer)));
         }
 
-        public static void UpdateServer(SubscribeLink item, string? proxyServer)
+        private static async Task UpdateServerCoreAsync(SubscribeLink item, string? proxyServer)
         {
             try
             {
@@ -33,11 +34,11 @@ namespace Netch.Utils
 
                 List<Server> servers;
 
-                var result = WebUtil.DownloadString(request, out var rep);
-                if (rep.StatusCode == HttpStatusCode.OK)
+                var (code, result) = await WebUtil.DownloadStringAsync(request);
+                if (code == HttpStatusCode.OK)
                     servers = ShareLink.ParseText(result);
                 else
-                    throw new Exception($"{item.Remark} Response Status Code: {rep.StatusCode}");
+                    throw new Exception($"{item.Remark} Response Status Code: {code}");
 
                 foreach (var server in servers)
                     server.Group = item.Remark;
@@ -53,7 +54,7 @@ namespace Netch.Utils
             catch (Exception e)
             {
                 Global.MainForm.NotifyTip($"{i18N.TranslateFormat("Update servers error from {0}", item.Remark)}\n{e.Message}", info: false);
-                Global.Logger.Error(e.ToString());
+                Log.Warning(e, "更新服务器失败");
             }
         }
     }

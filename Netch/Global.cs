@@ -1,12 +1,10 @@
-using Netch.Forms;
-using Netch.Interfaces;
-using Netch.Models;
-using Netch.Models.Loggers;
 using System;
 using System.Collections.Generic;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Windows.Forms;
+using Netch.Forms;
+using Netch.Models;
 
 namespace Netch
 {
@@ -34,21 +32,14 @@ namespace Netch
         {
             NetchExecutable = Application.ExecutablePath;
             NetchDir = Application.StartupPath;
-#if DEBUG
-            Logger = new ConsoleLogger();
-#else
-            Logger = new FileLogger();
-#endif
         }
-
-        public static ILogger Logger { get; }
 
         /// <summary>
         ///     主窗体的静态实例
         /// </summary>
         public static MainForm MainForm => LazyMainForm.Value;
 
-        public static JsonSerializerOptions NewDefaultJsonSerializerOptions => new()
+        public static JsonSerializerOptions NewCustomJsonSerializerOptions() => new()
         {
             WriteIndented = true,
             IgnoreNullValues = true,

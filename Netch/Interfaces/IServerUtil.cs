@@ -1,8 +1,8 @@
-﻿using Netch.Controllers;
-using System;
+﻿using System;
 using System.Collections.Generic;
+using Netch.Models;
 
-namespace Netch.Models
+namespace Netch.Interfaces
 {
     public interface IServerUtil
     {
@@ -28,7 +28,7 @@ namespace Netch.Models
         /// </summary>
         string[] UriScheme { get; }
 
-        public abstract Type ServerType { get; }
+        public Type ServerType { get; }
 
         public void Edit(Server s);
 
@@ -36,9 +36,9 @@ namespace Netch.Models
 
         string GetShareLink(Server s);
 
-        public abstract IServerController GetController();
+        public IServerController GetController();
 
-        public abstract IEnumerable<Server> ParseUri(string text);
+        public IEnumerable<Server> ParseUri(string text);
 
         bool CheckServer(Server s);
     }

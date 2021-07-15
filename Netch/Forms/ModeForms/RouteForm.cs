@@ -4,18 +4,20 @@ using Netch.Utils;
 using System;
 using System.IO;
 using System.Windows.Forms;
+using Netch.Enums;
 
-namespace Netch.Forms.Mode
+namespace Netch.Forms.ModeForms
 {
-    public partial class Route : Form
+    public partial class RouteForm : Form
     {
-        private readonly TagItem<int>[] _items = { new(1, "Proxy Rule IPs"), new(2, "Bypass Rule IPs") };
+        private readonly TagItem<ModeType>[] _items =
+            { new(ModeType.ProxyRuleIPs, "Proxy Rule IPs"), new(ModeType.BypassRuleIPs, "Bypass Rule IPs") };
 
-        private readonly Models.Mode? _mode;
+        private readonly Mode? _mode;
 
-        public Route(Models.Mode? mode = null)
+        public RouteForm(Mode? mode = null)
         {
-            if (mode != null && mode.Type is not (1 or 2))
+            if (mode != null && mode.Type is not (ModeType.ProxyRuleIPs or ModeType.BypassRuleIPs))
                 throw new ArgumentOutOfRangeException();
 
             _mode = mode;
@@ -37,7 +39,7 @@ namespace Netch.Forms.Mode
                 RemarkTextBox.Text = _mode.Remark;
                 comboBox1.SelectedValue = _mode.Type; // ComboBox SelectedValue worked after ctor
                 FilenameTextBox.Text = _mode.RelativePath;
-                richTextBox1.Lines = _mode.Rule.ToArray();
+                richTextBox1.Lines = _mode.Content.ToArray();
             }
 
             i18N.TranslateForm(this);
@@ -60,9 +62,9 @@ namespace Netch.Forms.Mode
             if (_mode != null)
             {
                 _mode.Remark = RemarkTextBox.Text;
-                _mode.Rule.Clear();
-                _mode.Rule.AddRange(richTextBox1.Lines);
-                _mode.Type = (int)comboBox1.SelectedValue;
+                _mode.Content.Clear();
+                _mode.Content.AddRange(richTextBox1.Lines);
+                _mode.Type = (ModeType)comboBox1.SelectedValue;
 
                 _mode.WriteFile();
                 MessageBoxX.Show(i18N.Translate("Mode updated successfully"));
@@ -77,13 +79,13 @@ namespace Netch.Forms.Mode
                     return;
                 }
 
-                var mode = new Models.Mode(fullName)
+                var mode = new Mode(fullName)
                 {
-                    Type = (int)comboBox1.SelectedValue,
+                    Type = (ModeType)comboBox1.SelectedValue,
                     Remark = RemarkTextBox.Text
                 };
 
-                mode.Rule.AddRange(richTextBox1.Lines);
+                mode.Content.AddRange(richTextBox1.Lines);
 
                 mode.WriteFile();
                 MessageBoxX.Show(i18N.Translate("Mode added successfully"));

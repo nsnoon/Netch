@@ -1,5 +1,3 @@
-using MaxMind.GeoIP2;
-using Microsoft.Win32.TaskScheduler;
 using System;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -13,13 +11,16 @@ using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using MaxMind.GeoIP2;
+using Microsoft.Win32.TaskScheduler;
+using Serilog;
 using Task = System.Threading.Tasks.Task;
 
 namespace Netch.Utils
 {
     public static class Utils
     {
-        public static bool Open(string path)
+        public static void Open(string path)
         {
             try
             {
@@ -29,12 +30,10 @@ namespace Netch.Utils
                     Arguments = path,
                     UseShellExecute = true
                 });
-
-                return true;
             }
-            catch
+            catch (Exception e)
             {
-                return false;
+                Log.Warning(e, "打开 {Uri} 失败", path);
             }
         }
 
@@ -58,33 +57,34 @@ namespace Netch.Utils
             return timeout;
         }
 
-        public static int ICMPing(IPAddress ip, int timeout = 1000)
+        public static async Task<int> ICMPingAsync(IPAddress ip, int timeout = 1000)
         {
-            var reply = new Ping().Send(ip, timeout);
+            var reply = await new Ping().SendPingAsync(ip, timeout);
 
-            if (reply?.Status == IPStatus.Success)
+            if (reply.Status == IPStatus.Success)
                 return Convert.ToInt32(reply.RoundtripTime);
 
             return timeout;
         }
 
-        public static string GetCityCode(string Hostname)
+        public static async Task<string> GetCityCodeAsync(string address)
         {
-            if (Hostname.Contains(":"))
-                Hostname = Hostname.Split(':')[0];
+            var i = address.IndexOf(':');
+            if (i != -1)
+                address = address[..i];
 
             string? country = null;
             try
             {
                 var databaseReader = new DatabaseReader("bin\\GeoLite2-Country.mmdb");
 
-                if (IPAddress.TryParse(Hostname, out _))
+                if (IPAddress.TryParse(address, out _))
                 {
-                    country = databaseReader.Country(Hostname).Country.IsoCode;
+                    country = databaseReader.Country(address).Country.IsoCode;
                 }
                 else
                 {
-                    var dnsResult = DnsUtils.Lookup(Hostname);
+                    var dnsResult = await DnsUtils.LookupAsync(address);
 
                     if (dnsResult != null)
                         country = databaseReader.Country(dnsResult).Country.IsoCode;
@@ -104,14 +104,20 @@ namespace Netch.Utils
         {
             try
             {
-                var sha256 = SHA256.Create();
                 using var fileStream = File.OpenRead(filePath);
-                return string.Concat(sha256.ComputeHash(fileStream).Select(b => b.ToString("x2")));
+                return SHA256ComputeCore(fileStream);
             }
-            catch
+            catch (Exception e)
             {
+                Log.Warning(e, $"Compute file \"{filePath}\" sha256 failed");
                 return "";
             }
+        }
+
+        private static string SHA256ComputeCore(Stream stream)
+        {
+            using var sha256 = SHA256.Create();
+            return string.Concat(sha256.ComputeHash(stream).Select(b => b.ToString("x2")));
         }
 
         public static string GetFileVersion(string file)
@@ -201,6 +207,9 @@ namespace Netch.Utils
 
                 td.Settings.ExecutionTimeLimit = TimeSpan.Zero;
                 td.Settings.DisallowStartIfOnBatteries = false;
+                td.Settings.StopIfGoingOnBatteries = false;
+                td.Settings.IdleSettings.StopOnIdleEnd = false;
+                td.Settings.IdleSettings.RestartOnIdle = false;
                 td.Settings.RunOnlyIfIdle = false;
                 td.Settings.Compatibility = TaskCompatibility.V2_1;
 
@@ -226,37 +235,6 @@ namespace Netch.Utils
             }
         }
 
-        public static async Task ProcessRunHiddenAsync(string fileName, string arguments = "", bool print = true)
-        {
-            var p = new Process
-            {
-                StartInfo = new ProcessStartInfo
-                {
-                    FileName = fileName,
-                    Arguments = arguments,
-                    WindowStyle = ProcessWindowStyle.Hidden,
-                    Verb = "runas",
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true
-                }
-            };
-
-            Global.Logger.Debug($"{fileName} {arguments}");
-
-            p.Start();
-            var output = await p.StandardOutput.ReadToEndAsync();
-            var error = await p.StandardError.ReadToEndAsync();
-            if (print)
-            {
-                Console.Write(output);
-                Console.Write(error);
-            }
-
-            p.WaitForExit();
-        }
-
         public static int SubnetToCidr(string value)
         {
             var subnet = IPAddress.Parse(value);
@@ -274,6 +252,16 @@ namespace Netch.Utils
                 host += $":{port}";
 
             return host;
+        }
+
+        public static string GetHostFromUri(string str)
+        {
+            var startIndex = str.LastIndexOf('/');
+            if (startIndex != -1)
+                str = str[(startIndex + 1)..];
+
+            var endIndex = str.IndexOf(':');
+            return endIndex == -1 ? str : str[..endIndex];
         }
     }
 }

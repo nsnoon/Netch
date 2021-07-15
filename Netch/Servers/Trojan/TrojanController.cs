@@ -1,52 +1,58 @@
-﻿using Netch.Controllers;
-using Netch.Models;
-using Netch.Servers.Trojan.Models;
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.IO;
+using System.Net;
 using System.Text.Json;
+using System.Threading.Tasks;
+using Netch.Controllers;
+using Netch.Interfaces;
+using Netch.Models;
+using Netch.Servers.Models;
+using Netch.Utils;
 
-namespace Netch.Servers.Trojan
+namespace Netch.Servers
 {
     public class TrojanController : Guard, IServerController
     {
-        public override string MainFile { get; protected set; } = "Trojan.exe";
+        public TrojanController() : base("Trojan.exe")
+        {
+        }
 
-        protected override IEnumerable<string> StartedKeywords { get; set; } = new[] { "started" };
+        protected override IEnumerable<string> StartedKeywords => new[] { "started" };
 
-        protected override IEnumerable<string> StoppedKeywords { get; set; } = new[] { "exiting" };
+        protected override IEnumerable<string> FailedKeywords => new[] { "exiting" };
 
-        public override string Name { get; } = "Trojan";
+        public override string Name => "Trojan";
 
         public ushort? Socks5LocalPort { get; set; }
 
         public string? LocalAddress { get; set; }
 
-        public void Start(in Server s, in Mode mode)
+        public async Task<Socks5> StartAsync(Server s)
         {
             var server = (Trojan)s;
             var trojanConfig = new TrojanConfig
             {
                 local_addr = this.LocalAddress(),
                 local_port = this.Socks5LocalPort(),
-                remote_addr = server.Hostname,
+                remote_addr = await server.AutoResolveHostnameAsync(),
                 remote_port = server.Port,
                 password = new List<string>
                 {
                     server.Password
+                },
+                ssl = new TrojanSSL
+                {
+                    sni = server.Host.ValueOrDefault() ?? (Global.Settings.ResolveServerHostname ? server.Hostname : "")
                 }
             };
 
-            if (!string.IsNullOrWhiteSpace(server.Host))
-                trojanConfig.ssl.sni = server.Host;
+            await using (var fileStream = new FileStream(Constants.TempConfig, FileMode.Create, FileAccess.Write, FileShare.Read))
+            {
+                await JsonSerializer.SerializeAsync(fileStream, trojanConfig, Global.NewCustomJsonSerializerOptions());
+            }
 
-            File.WriteAllBytes("data\\last.json", JsonSerializer.SerializeToUtf8Bytes(trojanConfig, Global.NewDefaultJsonSerializerOptions));
-
-            StartInstanceAuto("-c ..\\data\\last.json");
-        }
-
-        public override void Stop()
-        {
-            StopInstance();
+            await StartGuardAsync("-c ..\\data\\last.json");
+            return new Socks5Bridge(IPAddress.Loopback.ToString(), this.Socks5LocalPort(), server.Hostname);
         }
     }
 }

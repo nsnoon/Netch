@@ -1,12 +1,12 @@
-﻿using Netch.Utils;
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Text.Json.Serialization;
 using System.Threading.Tasks;
+using Netch.Utils;
 
 namespace Netch.Models
 {
-    public class Server : ICloneable
+    public abstract class Server : ICloneable
     {
         /// <summary>
         ///     延迟
@@ -17,7 +17,7 @@ namespace Netch.Models
         /// <summary>
         ///     组
         /// </summary>
-        public string Group { get; set; } = "None";
+        public string Group { get; set; } = Constants.DefaultGroup;
 
         /// <summary>
         ///     地址
@@ -61,55 +61,48 @@ namespace Netch.Models
         {
             var remark = string.IsNullOrWhiteSpace(Remark) ? $"{Hostname}:{Port}" : Remark;
 
-            if (Group.Equals("None") || Group.Equals(""))
-                Group = "NONE";
-
-            string shortName;
-            if (Type == string.Empty)
-            {
-                shortName = "WTF";
-            }
-            else
-            {
-                shortName = ServerHelper.GetUtilByTypeName(Type).ShortName;
-            }
+            var shortName = Type.IsNullOrEmpty() ? "WTF" : ServerHelper.GetUtilByTypeName(Type).ShortName;
 
             return $"[{shortName}][{Group}] {remark}";
         }
+
+        public abstract string MaskedData();
 
         /// <summary>
         ///     测试延迟
         /// </summary>
         /// <returns>延迟</returns>
-        public int Test()
+        public async Task<int> PingAsync()
         {
             try
             {
-                var destination = DnsUtils.Lookup(Hostname);
+                var destination = await DnsUtils.LookupAsync(Hostname);
                 if (destination == null)
                     return Delay = -2;
 
                 var list = new Task<int>[3];
                 for (var i = 0; i < 3; i++)
-                    list[i] = Task.Run(async () =>
+                {
+                    async Task<int> PingCoreAsync()
                     {
                         try
                         {
                             return Global.Settings.ServerTCPing
                                 ? await Utils.Utils.TCPingAsync(destination, Port)
-                                : Utils.Utils.ICMPing(destination, Port);
+                                : await Utils.Utils.ICMPingAsync(destination);
                         }
                         catch (Exception)
                         {
                             return -4;
                         }
-                    });
+                    }
 
-                Task.WaitAll(list[0], list[1], list[2]);
+                    list[i] = PingCoreAsync();
+                }
 
-                var min = Math.Min(list[0].Result, list[1].Result);
-                min = Math.Min(min, list[2].Result);
-                return Delay = min;
+                var resTask = await Task.WhenAny(list[0], list[1], list[2]);
+
+                return Delay = await resTask;
             }
             catch (Exception)
             {
@@ -120,22 +113,14 @@ namespace Netch.Models
 
     public static class ServerExtension
     {
-        public static string AutoResolveHostname(this Server server)
+        public static async Task<string> AutoResolveHostnameAsync(this Server server)
         {
-            return Global.Settings.ResolveServerHostname ? DnsUtils.Lookup(server.Hostname)!.ToString() : server.Hostname;
+            return Global.Settings.ResolveServerHostname ? (await DnsUtils.LookupAsync(server.Hostname))!.ToString() : server.Hostname;
         }
 
-        public static bool Valid(this Server server)
+        public static bool IsInGroup(this Server server)
         {
-            try
-            {
-                ServerHelper.GetTypeByTypeName(server.Type);
-                return true;
-            }
-            catch
-            {
-                return false;
-            }
+            return server.Group is not Constants.DefaultGroup;
         }
     }
 }

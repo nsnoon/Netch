@@ -1,8 +1,10 @@
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
+using Serilog;
 
 namespace Netch.Interops
 {
-    public static class RedirectorInterop
+    public static class Redirector
     {
         public enum NameList
         {
@@ -42,18 +44,18 @@ namespace Netch.Interops
 
         public static bool Dial(NameList name, string value)
         {
-            Global.Logger.Debug($"Dial {name} {value}");
+            Log.Verbose($"[Redirector] Dial {name}: {value}");
             return aio_dial(name, value);
         }
 
-        public static bool Init()
+        public static async Task<bool> InitAsync()
         {
-            return aio_init();
+            return await Task.Run(aio_init).ConfigureAwait(false);
         }
 
-        public static bool Free()
+        public static async Task<bool> FreeAsync()
         {
-            return aio_free();
+            return await Task.Run(aio_free).ConfigureAwait(false);
         }
 
         public const int UdpNameListOffset = (int)NameList.TYPE_UDPLISN - (int)NameList.TYPE_TCPLISN;

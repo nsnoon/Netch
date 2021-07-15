@@ -1,9 +1,11 @@
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading.Tasks;
+using Serilog;
 
 namespace Netch.Interops
 {
-    public static class TUNInterop
+    public static class tun2socks
     {
         public enum NameList
         {
@@ -35,18 +37,19 @@ namespace Netch.Interops
 
         public static bool Dial(NameList name, string value)
         {
-            Global.Logger.Debug($"Dial {name} {value}");
+            Log.Verbose( $"[tun2socks] Dial {name}: {value}");
             return tun_dial(name, Encoding.UTF8.GetBytes(value));
         }
 
         public static bool Init()
         {
+            Log.Verbose("[tun2socks] init");
             return tun_init();
         }
 
-        public static bool Free()
+        public static async Task<bool> FreeAsync()
         {
-            return tun_free();
+            return await Task.Run(tun_free).ConfigureAwait(false);
         }
 
         private const string tun2socks_bin = "tun2socks.bin";

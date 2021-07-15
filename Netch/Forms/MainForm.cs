@@ -1,12 +1,7 @@
-using Microsoft.Win32;
-using Netch.Controllers;
-using Netch.Forms.Mode;
-using Netch.Models;
-using Netch.Properties;
-using Netch.Utils;
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Drawing;
 using System.IO;
@@ -14,18 +9,25 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using Windows.Win32;
+using Windows.Win32.Foundation;
+using Windows.Win32.UI.WindowsAndMessaging;
+using Microsoft.VisualStudio.Threading;
+using Microsoft.Win32;
+using Netch.Controllers;
+using Netch.Enums;
+using Netch.Forms.ModeForms;
+using Netch.Interfaces;
+using Netch.Models;
+using Netch.Properties;
+using Netch.Services;
+using Netch.Utils;
+using Serilog;
 
 namespace Netch.Forms
 {
     public partial class MainForm : Form
     {
-        private void createRouteTableModeToolStripMenuItem_Click(object sender, EventArgs e)
-        {
-            Hide();
-            new Route().ShowDialog();
-            Show();
-        }
-
         #region Start
 
         private readonly Dictionary<string, object> _mainFormText = new();
@@ -47,20 +49,20 @@ namespace Netch.Forms
 
             // 监听电源事件
             SystemEvents.PowerModeChanged += SystemEvents_PowerModeChanged;
-
-            CheckForIllegalCrossThreadCalls = false;
         }
 
         private void AddAddServerToolStripMenuItems()
         {
-            foreach (var serversUtil in ServerHelper.ServerUtils.Where(i => !string.IsNullOrEmpty(i.FullName)))
+            foreach (var serversUtil in ServerHelper.ServerUtilDictionary.Values.OrderBy(i => i.Priority)
+                .Where(i => !string.IsNullOrEmpty(i.FullName)))
             {
                 var fullName = serversUtil.FullName;
                 var control = new ToolStripMenuItem
                 {
                     Name = $"Add{fullName}ServerToolStripMenuItem",
                     Size = new Size(259, 22),
-                    Text = i18N.TranslateFormat("Add [{0}] Server", fullName)
+                    Text = i18N.TranslateFormat("Add [{0}] Server", fullName),
+                    Tag = serversUtil
                 };
 
                 _mainFormText.Add(control.Name, new[] { "Add [{0}] Server", fullName });
@@ -75,10 +77,13 @@ namespace Netch.Forms
             RecordSize();
 
             LoadServers();
+            SelectLastServer();
             ServerHelper.DelayTestHelper.UpdateInterval();
 
+            ModeHelper.InitWatcher();
             ModeHelper.Load();
             LoadModes();
+            SelectLastMode();
 
             // 加载翻译
             TranslateControls();
@@ -89,23 +94,19 @@ namespace Netch.Forms
             // 加载快速配置
             LoadProfiles();
 
-            Task.Run(() =>
-            {
-                // 检查更新
-                if (Global.Settings.CheckUpdateWhenOpened)
-                    CheckUpdate();
-            });
+            // 检查更新
+            if (Global.Settings.CheckUpdateWhenOpened)
+                CheckUpdateAsync().Forget();
 
-            Task.Run(() =>
-            {
-                // 检查订阅更新
-                if (Global.Settings.UpdateServersWhenOpened)
-                    UpdateServersFromSubscribe().Wait();
+            // 检查订阅更新
+            if (Global.Settings.UpdateServersWhenOpened)
+                UpdateServersFromSubscribeAsync().Forget();
 
-                // 打开软件时启动加速，产生开始按钮点击事件
-                if (Global.Settings.StartWhenOpened)
-                    ControlButton_Click(null, null);
-            });
+            // 打开软件时启动加速，产生开始按钮点击事件
+            if (Global.Settings.StartWhenOpened)
+                ControlButton.PerformClick();
+
+            Netch.SingleInstance.ListenForArgumentsFromSuccessiveInstances();
         }
 
         private void RecordSize()
@@ -208,7 +209,7 @@ namespace Netch.Forms
 
         #region Server
 
-        private void ImportServersFromClipboardToolStripMenuItem_Click(object sender, EventArgs e)
+        private async void ImportServersFromClipboardToolStripMenuItem_Click(object sender, EventArgs e)
         {
             var texts = Clipboard.GetText();
             if (!string.IsNullOrWhiteSpace(texts))
@@ -218,27 +219,22 @@ namespace Netch.Forms
                 NotifyTip(i18N.TranslateFormat("Import {0} server(s) form Clipboard", servers.Count));
 
                 LoadServers();
-                Configuration.Save();
+                await Configuration.SaveAsync();
             }
         }
 
-        private void AddServerToolStripMenuItem_Click([NotNull] object? sender, EventArgs? e)
+        private async void AddServerToolStripMenuItem_Click([NotNull] object? sender, EventArgs? e)
         {
             if (sender == null)
                 throw new ArgumentNullException(nameof(sender));
 
-            // TODO get Util from Tag
-            var s = ((ToolStripMenuItem)sender).Text;
-
-            var start = s.IndexOf("[", StringComparison.Ordinal) + 1;
-            var end = s.IndexOf("]", start, StringComparison.Ordinal);
-            var result = s.Substring(start, end - start);
+            var util = (IServerUtil)((ToolStripMenuItem)sender).Tag;
 
             Hide();
-            ServerHelper.GetUtilByFullName(result).Create();
+            util.Create();
 
             LoadServers();
-            Configuration.Save();
+            await Configuration.SaveAsync();
             Show();
         }
 
@@ -249,7 +245,14 @@ namespace Netch.Forms
         private void CreateProcessModeToolStripButton_Click(object sender, EventArgs e)
         {
             Hide();
-            new Process().ShowDialog();
+            new ProcessForm().ShowDialog();
+            Show();
+        }
+
+        private void createRouteTableModeToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            Hide();
+            new RouteForm().ShowDialog();
             Show();
         }
 
@@ -267,10 +270,10 @@ namespace Netch.Forms
 
         private async void UpdateServersFromSubscribeLinksToolStripMenuItem_Click(object sender, EventArgs e)
         {
-            await UpdateServersFromSubscribe();
+            await UpdateServersFromSubscribeAsync();
         }
 
-        private async Task UpdateServersFromSubscribe()
+        private async Task UpdateServersFromSubscribeAsync()
         {
             void DisableItems(bool v)
             {
@@ -291,13 +294,13 @@ namespace Netch.Forms
                 await Subscription.UpdateServersAsync();
 
                 LoadServers();
-                Configuration.Save();
+                await Configuration.SaveAsync();
                 StatusText(i18N.Translate("Subscription updated"));
             }
             catch (Exception e)
             {
                 NotifyTip(i18N.Translate("update servers failed") + "\n" + e.Message, info: false);
-                Global.Logger.Error("更新服务器 失败！" + e);
+                Log.Error("更新服务器 失败！" + e);
             }
             finally
             {
@@ -309,32 +312,29 @@ namespace Netch.Forms
 
         #region Options
 
-        private void CheckForUpdatesToolStripMenuItem_Click(object sender, EventArgs e)
+        private async void CheckForUpdatesToolStripMenuItem_Click(object sender, EventArgs e)
         {
-            Task.Run(() =>
+            void OnNewVersionNotFound(object? o, EventArgs? args)
             {
-                void OnNewVersionNotFound(object? o, EventArgs? args)
-                {
-                    NotifyTip(i18N.Translate("Already latest version"));
-                }
+                NotifyTip(i18N.Translate("Already latest version"));
+            }
 
-                void OnNewVersionFoundFailed(object? o, EventArgs? args)
-                {
-                    NotifyTip(i18N.Translate("New version found failed"), info: false);
-                }
+            void OnNewVersionFoundFailed(object? o, EventArgs? args)
+            {
+                NotifyTip(i18N.Translate("New version found failed"), info: false);
+            }
 
-                try
-                {
-                    UpdateChecker.NewVersionNotFound += OnNewVersionNotFound;
-                    UpdateChecker.NewVersionFoundFailed += OnNewVersionFoundFailed;
-                    CheckUpdate();
-                }
-                finally
-                {
-                    UpdateChecker.NewVersionNotFound -= OnNewVersionNotFound;
-                    UpdateChecker.NewVersionFoundFailed -= OnNewVersionFoundFailed;
-                }
-            });
+            try
+            {
+                UpdateChecker.NewVersionNotFound += OnNewVersionNotFound;
+                UpdateChecker.NewVersionFoundFailed += OnNewVersionFoundFailed;
+                await CheckUpdateAsync();
+            }
+            finally
+            {
+                UpdateChecker.NewVersionNotFound -= OnNewVersionNotFound;
+                UpdateChecker.NewVersionFoundFailed -= OnNewVersionFoundFailed;
+            }
         }
 
         private void OpenDirectoryToolStripMenuItem_Click(object sender, EventArgs e)
@@ -370,11 +370,10 @@ namespace Netch.Forms
             StatusText(i18N.TranslateFormat("Uninstalling {0}", "NF Service"));
             try
             {
-                await Task.Run(() =>
-                {
-                    if (NFController.UninstallDriver())
-                        NotifyTip(i18N.TranslateFormat("{0} has been uninstalled", "NF Service"));
-                });
+                var task = Task.Run(NFController.UninstallDriver);
+
+                if (await task)
+                    NotifyTip(i18N.TranslateFormat("{0} has been uninstalled", "NF Service"));
             }
             finally
             {
@@ -386,6 +385,13 @@ namespace Netch.Forms
         private void RemoveNetchFirewallRulesToolStripMenuItem_Click(object sender, EventArgs e)
         {
             Firewall.RemoveNetchFwRules();
+        }
+
+        private void ShowHideConsoleToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            var windowStyles = (WINDOW_STYLE)PInvoke.GetWindowLong(new HWND(Netch.ConsoleHwnd), WINDOW_LONG_PTR_INDEX.GWL_STYLE);
+            var visible = windowStyles.HasFlag(WINDOW_STYLE.WS_VISIBLE);
+            PInvoke.ShowWindow(Netch.ConsoleHwnd, visible ? SHOW_WINDOW_CMD.SW_HIDE : SHOW_WINDOW_CMD.SW_SHOWNOACTIVATE);
         }
 
         #endregion
@@ -421,21 +427,59 @@ namespace Netch.Forms
 
             try
             {
-                await Task.Run(() =>
+                var progress = new Progress<int>();
+                progress.ProgressChanged += (_, percentage) => { NewVersionLabel.Text = $"{percentage}%"; };
+
+                string downloadDirectory = Path.Combine(Global.NetchDir, "data");
+
+                var (updateFileName, sha256) = UpdateChecker.GetLatestUpdateFileNameAndHash();
+                var updateFileUrl = UpdateChecker.LatestRelease.assets[0].browser_download_url!;
+
+                var updateFileFullName = Path.Combine(downloadDirectory, updateFileName);
+                var updater = new Updater(updateFileFullName, Global.NetchDir);
+
+                var downloaded = false;
+                if (File.Exists(updateFileFullName))
+                    if (Utils.Utils.SHA256CheckSum(updateFileFullName) == sha256)
+                        downloaded = true;
+                    else
+                        File.Delete(updateFileFullName);
+
+                if (!downloaded)
                 {
-                    Updater.Updater.DownloadAndUpdate(Path.Combine(Global.NetchDir, "data"),
-                        Global.NetchDir,
-                        (_, args) => BeginInvoke(new Action(() => NewVersionLabel.Text = $"{args.ProgressPercentage}%")));
-                });
+                    try
+                    {
+                        await WebUtil.DownloadFileAsync(updateFileUrl, updateFileFullName, progress);
+                    }
+                    catch (Exception e1)
+                    {
+                        Log.Warning(e1, "Download Update File Failed");
+                        throw new MessageException($"Download Update File Failed: {e1.Message}");
+                    }
+
+                    if (Utils.Utils.SHA256CheckSum(updateFileFullName) != sha256)
+                        throw new MessageException(i18N.Translate("The downloaded file has the wrong hash"));
+                }
+
+                ModeHelper.SuspendWatcher = true;
+                await StopAsync();
+                await Configuration.SaveAsync();
+
+                // Update
+                await Task.Run(updater.ApplyUpdate);
+
+                // release mutex, exit
+                Netch.SingleInstance.Dispose();
+                Process.Start(Global.NetchExecutable);
+                Environment.Exit(0);
+            }
+            catch (MessageException exception)
+            {
+                NotifyTip(exception.Message, info: false);
             }
             catch (Exception exception)
             {
-                if (exception is not MessageException)
-                {
-                    Global.Logger.Error($"更新失败: {exception}");
-                    Global.Logger.ShowLog();
-                }
-
+                Log.Error(exception, "更新未处理异常");
                 NotifyTip(exception.Message, info: false);
             }
             finally
@@ -465,21 +509,20 @@ namespace Netch.Forms
         {
             if (!IsWaiting())
             {
-                // 停止
-                await StopAsyncCore();
+                await StopCoreAsync();
                 return;
             }
 
-            Configuration.Save();
+            Configuration.SaveAsync().Forget();
 
             // 服务器、模式 需选择
-            if (!(ServerComboBox.SelectedItem is Server server))
+            if (ServerComboBox.SelectedItem is not Server server)
             {
                 MessageBoxX.Show(i18N.Translate("Please select a server first"));
                 return;
             }
 
-            if (!(ModeComboBox.SelectedItem is Models.Mode mode))
+            if (ModeComboBox.SelectedItem is not Mode mode)
             {
                 MessageBoxX.Show(i18N.Translate("Please select a mode first"));
                 return;
@@ -501,34 +544,32 @@ namespace Netch.Forms
 
             State = State.Started;
 
-            _ = Task.Run(Bandwidth.NetTraffic);
-            _ = Task.Run(NatTest);
+            Task.Run(Bandwidth.NetTraffic).Forget();
+            NatTestAsync().Forget();
 
             if (Global.Settings.MinimizeWhenStarted)
                 Minimize();
 
             // 自动检测延迟
-            _ = Task.Run(() =>
+            async Task StartedPingAsync()
             {
                 while (State == State.Started)
                 {
-                    bool StartedPingEnabled()
+                    if (Global.Settings.StartedPingInterval >= 0)
                     {
-                        return Global.Settings.StartedPingInterval >= 0;
-                    }
-
-                    if (StartedPingEnabled())
-                    {
-                        server.Test();
+                        await server.PingAsync();
                         ServerComboBox.Refresh();
-                    }
 
-                    if (StartedPingEnabled())
-                        Thread.Sleep(Global.Settings.StartedPingInterval * 1000);
+                        await Task.Delay(Global.Settings.StartedPingInterval * 1000);
+                    }
                     else
-                        Thread.Sleep(5000);
+                    {
+                        await Task.Delay(5000);
+                    }
                 }
-            });
+            }
+
+            StartedPingAsync().Forget();
         }
 
         #endregion
@@ -566,11 +607,11 @@ namespace Netch.Forms
         private void LoadServers()
         {
             ServerComboBox.Items.Clear();
-            ServerComboBox.Items.AddRange(Global.Settings.Server.ToArray());
+            ServerComboBox.Items.AddRange(Global.Settings.Server.Cast<object>().ToArray());
             SelectLastServer();
         }
 
-        public void SelectLastServer()
+        private void SelectLastServer()
         {
             // 如果值合法，选中该位置
             if (Global.Settings.ServerComboBoxSelectedIndex > 0 && Global.Settings.ServerComboBoxSelectedIndex < ServerComboBox.Items.Count)
@@ -587,7 +628,7 @@ namespace Netch.Forms
             Global.Settings.ServerComboBoxSelectedIndex = ServerComboBox.SelectedIndex;
         }
 
-        private void EditServerPictureBox_Click(object sender, EventArgs e)
+        private async void EditServerPictureBox_Click(object sender, EventArgs e)
         {
             // 当前ServerComboBox中至少有一项
             if (!(ServerComboBox.SelectedItem is Server server))
@@ -596,41 +637,34 @@ namespace Netch.Forms
                 return;
             }
 
-            if (!server.Valid())
-                return;
-
             Hide();
             ServerHelper.GetUtilByTypeName(server.Type).Edit(server);
             LoadServers();
-            Configuration.Save();
+            await Configuration.SaveAsync();
             Show();
         }
 
-        private void SpeedPictureBox_Click(object sender, EventArgs e)
+        private async void SpeedPictureBox_Click(object sender, EventArgs e)
         {
+            void Enable()
+            {
+                ServerComboBox.Refresh();
+                Enabled = true;
+                StatusText();
+            }
+
             Enabled = false;
             StatusText(i18N.Translate("Testing"));
 
             if (!IsWaiting() || ModifierKeys == Keys.Control)
             {
-                (ServerComboBox.SelectedItem as Server)?.Test();
-                ServerComboBox.Refresh();
-                Enabled = true;
-                StatusText();
+                (ServerComboBox.SelectedItem as Server)?.PingAsync();
+                Enable();
             }
             else
             {
-                ServerHelper.DelayTestHelper.TestDelayFinished += OnTestDelayFinished;
-                _ = Task.Run(ServerHelper.DelayTestHelper.TestAllDelay);
-
-                void OnTestDelayFinished(object? o1, EventArgs? e1)
-                {
-                    Refresh();
-
-                    ServerHelper.DelayTestHelper.TestDelayFinished -= OnTestDelayFinished;
-                    Enabled = true;
-                    StatusText();
-                }
+                await ServerHelper.DelayTestHelper.TestAllDelayAsync();
+                Enable();
             }
         }
 
@@ -642,9 +676,6 @@ namespace Netch.Forms
                 MessageBoxX.Show(i18N.Translate("Please select a server first"));
                 return;
             }
-
-            if (!server.Valid())
-                return;
 
             try
             {
@@ -682,13 +713,19 @@ namespace Netch.Forms
 
         public void LoadModes()
         {
+            if (InvokeRequired)
+            {
+                Invoke(new Action(LoadModes));
+                return;
+            }
+
             ModeComboBox.Items.Clear();
             ModeComboBox.Items.AddRange(Global.Modes.Cast<object>().ToArray());
             ModeComboBox.Tag = null;
             SelectLastMode();
         }
 
-        public void SelectLastMode()
+        private void SelectLastMode()
         {
             // 如果值合法，选中该位置
             if (Global.Settings.ModeComboBoxSelectedIndex > 0 && Global.Settings.ModeComboBoxSelectedIndex < ModeComboBox.Items.Count)
@@ -704,7 +741,7 @@ namespace Netch.Forms
         {
             try
             {
-                Global.Settings.ModeComboBoxSelectedIndex = Global.Modes.IndexOf((Models.Mode)ModeComboBox.SelectedItem);
+                Global.Settings.ModeComboBoxSelectedIndex = Global.Modes.IndexOf((Mode)ModeComboBox.SelectedItem);
             }
             catch
             {
@@ -721,7 +758,7 @@ namespace Netch.Forms
                 return;
             }
 
-            var mode = (Models.Mode)ModeComboBox.SelectedItem;
+            var mode = (Mode)ModeComboBox.SelectedItem;
             if (ModifierKeys == Keys.Control)
             {
                 Utils.Utils.Open(ModeHelper.GetFullPath(mode.RelativePath!));
@@ -730,15 +767,15 @@ namespace Netch.Forms
 
             switch (mode.Type)
             {
-                case 0:
+                case ModeType.Process:
                     Hide();
-                    new Process(mode).ShowDialog();
+                    new ProcessForm(mode).ShowDialog();
                     Show();
                     break;
-                case 1:
-                case 2:
+                case ModeType.ProxyRuleIPs:
+                case ModeType.BypassRuleIPs:
                     Hide();
-                    new Route(mode).ShowDialog();
+                    new RouteForm(mode).ShowDialog();
                     Show();
                     break;
                 default:
@@ -756,7 +793,7 @@ namespace Netch.Forms
                 return;
             }
 
-            ModeHelper.Delete((Models.Mode)ModeComboBox.SelectedItem);
+            ModeHelper.Delete((Mode)ModeComboBox.SelectedItem);
             SelectLastMode();
         }
 
@@ -834,7 +871,7 @@ namespace Netch.Forms
             ProfileNameText.Text = profile.ProfileName;
 
             var server = ServerComboBox.Items.Cast<Server>().FirstOrDefault(s => s.Remark.Equals(profile.ServerRemark));
-            var mode = ModeComboBox.Items.Cast<Models.Mode>().FirstOrDefault(m => m.Remark.Equals(profile.ModeRemark));
+            var mode = ModeComboBox.Items.Cast<Mode>().FirstOrDefault(m => m.Remark.Equals(profile.ModeRemark));
 
             if (server == null)
                 throw new Exception("Server not found.");
@@ -849,7 +886,7 @@ namespace Netch.Forms
         private Profile CreateProfileAtIndex(int index)
         {
             var server = (Server)ServerComboBox.SelectedItem;
-            var mode = (Models.Mode)ModeComboBox.SelectedItem;
+            var mode = (Mode)ModeComboBox.SelectedItem;
             var name = ProfileNameText.Text;
 
             Profile? profile;
@@ -1005,25 +1042,19 @@ namespace Netch.Forms
             }
         }
 
-        private async Task StopAsyncCore()
-        {
-            State = State.Stopping;
-            await MainController.StopAsync();
-            State = State.Stopped;
-        }
-
-        public void Stop()
+        public async Task StopAsync()
         {
             if (IsWaiting())
                 return;
 
-            if (InvokeRequired)
-            {
-                Invoke(new Action(Stop));
-                return;
-            }
+            await StopCoreAsync();
+        }
 
-            StopAsyncCore().Wait();
+        private async Task StopCoreAsync()
+        {
+            State = State.Stopping;
+            await MainController.StopAsync();
+            State = State.Stopped;
         }
 
         private bool IsWaiting()
@@ -1068,14 +1099,8 @@ namespace Netch.Forms
             UsedBandwidthLabel.Visible /*= UploadSpeedLabel.Visible*/ = DownloadSpeedLabel.Visible = state;
         }
 
-        public void NatTypeStatusText(string? text = null, string? country = null)
+        private void NatTypeStatusText(string? text = null, string? country = null)
         {
-            if (InvokeRequired)
-            {
-                BeginInvoke(new Action<string, string>(NatTypeStatusText), text, country);
-                return;
-            }
-
             if (State != State.Started)
             {
                 NatTypeStatusLabel.Text = "";
@@ -1123,41 +1148,47 @@ namespace Netch.Forms
             }
         }
 
-        private void NatTypeStatusLabel_Click(object sender, EventArgs e)
+        private async void NatTypeStatusLabel_Click(object sender, EventArgs e)
         {
-            if (_state == State.Started && NttTested)
-                NatTest();
+            if (_state == State.Started && !Monitor.IsEntered(_natTestLock))
+                await NatTestAsync();
         }
 
-        private static bool NttTested;
+        private bool _natTestLock = true;
 
         /// <summary>
         ///     测试 NAT
         /// </summary>
-        public void NatTest()
+        private async Task NatTestAsync()
         {
             if (!MainController.Mode!.TestNatRequired())
                 return;
 
-            NttTested = false;
-            Task.Run(() =>
-            {
-                NatTypeStatusText(i18N.Translate("Starting NatTester"));
+            if (!_natTestLock)
+                return;
 
-                var (result, localEnd, publicEnd) = MainController.NTTController.Start().Result;
+            _natTestLock = false;
+
+            try
+            {
+                NatTypeStatusText(i18N.Translate("Testing NAT"));
+
+                var (result, _, publicEnd) = await MainController.NTTController.StartAsync();
 
                 if (!string.IsNullOrEmpty(publicEnd))
                 {
-                    var country = Utils.Utils.GetCityCode(publicEnd!);
+                    var country = await Utils.Utils.GetCityCodeAsync(publicEnd!);
                     NatTypeStatusText(result, country);
                 }
                 else
                 {
                     NatTypeStatusText(result ?? "Error");
                 }
-
-                NttTested = true;
-            });
+            }
+            finally
+            {
+                _natTestLock = true;
+            }
         }
 
         #endregion
@@ -1178,7 +1209,7 @@ namespace Netch.Forms
                     if (!IsWaiting())
                     {
                         _resumeFlag = true;
-                        Global.Logger.Info("操作系统即将挂起，自动停止");
+                        Log.Information("操作系统即将挂起，自动停止");
                         ControlButton_Click(null, null);
                     }
 
@@ -1187,7 +1218,7 @@ namespace Netch.Forms
                     if (_resumeFlag)
                     {
                         _resumeFlag = false;
-                        Global.Logger.Info("操作系统即将从挂起状态继续，自动重启");
+                        Log.Information("操作系统即将从挂起状态继续，自动重启");
                         ControlButton_Click(null, null);
                     }
 
@@ -1227,16 +1258,13 @@ namespace Netch.Forms
             Hide();
 
             if (saveConfiguration)
-            {
-                Configuration.Save();
-            }
+                await Configuration.SaveAsync();
 
-            foreach (var file in new[] { "data\\last.json", "data\\privoxy.conf" })
+            foreach (var file in new[] { Constants.TempConfig, Constants.TempRouteFile })
                 if (File.Exists(file))
                     File.Delete(file);
 
-            if (IsWaiting())
-                await StopAsyncCore();
+            await StopAsync();
 
             Dispose();
             Environment.Exit(Environment.ExitCode);
@@ -1266,12 +1294,12 @@ namespace Netch.Forms
 
         #region Updater
 
-        private void CheckUpdate()
+        private async Task CheckUpdateAsync()
         {
             try
             {
                 UpdateChecker.NewVersionFound += OnUpdateCheckerOnNewVersionFound;
-                UpdateChecker.Check(Global.Settings.CheckBetaUpdate).Wait();
+                await UpdateChecker.CheckAsync(Global.Settings.CheckBetaUpdate);
                 if (Flags.AlwaysShowNewVersionFound)
                     OnUpdateCheckerOnNewVersionFound(null!, null!);
             }
@@ -1339,14 +1367,18 @@ namespace Netch.Forms
                 return;
             }
 
-            if (WindowState == FormWindowState.Minimized)
-            {
-                Visible = true;
-                ShowInTaskbar = true;                 // 显示在系统任务栏 
-                WindowState = FormWindowState.Normal; // 还原窗体 
-            }
+            var forms = Application.OpenForms.Cast<Form>().ToList();
+            var anyWindowOpened = forms.Any(f => f is not (MainForm or LogForm));
 
-            Activate();
+            forms.ForEach(f =>
+            {
+                if (anyWindowOpened && f is MainForm or LogForm)
+                    return;
+
+                f.Show();
+                f.WindowState = FormWindowState.Normal;
+                f.Activate();
+            });
         }
 
         /// <summary>
@@ -1359,14 +1391,7 @@ namespace Netch.Forms
 
         private void NotifyIcon_MouseDoubleClick(object? sender, MouseEventArgs? e)
         {
-            if (WindowState == FormWindowState.Minimized)
-            {
-                Visible = true;
-                ShowInTaskbar = true;                 //显示在系统任务栏 
-                WindowState = FormWindowState.Normal; //还原窗体
-            }
-
-            Activate();
+            ShowMainFormToolStripButton.PerformClick();
         }
 
         public void NotifyTip(string text, int timeout = 0, bool info = true)
@@ -1386,7 +1411,7 @@ namespace Netch.Forms
 
         private void ComboBox_DrawItem(object sender, DrawItemEventArgs e)
         {
-            if (!(sender is ComboBox cbx))
+            if (sender is not ComboBox cbx)
                 return;
 
             // 绘制背景颜色
@@ -1401,38 +1426,38 @@ namespace Netch.Forms
             switch (cbx.Items[e.Index])
             {
                 case Server item:
-                    {
-                        // 计算延迟底色
-                        var numBoxBackBrush = item.Delay switch { > 200 => Brushes.Red, > 80 => Brushes.Yellow, >= 0 => _greenBrush, _ => Brushes.Gray };
+                {
+                    // 计算延迟底色
+                    var numBoxBackBrush = item.Delay switch { > 200 => Brushes.Red, > 80 => Brushes.Yellow, >= 0 => _greenBrush, _ => Brushes.Gray };
 
-                        // 绘制延迟底色
-                        e.Graphics.FillRectangle(numBoxBackBrush, _numberBoxX, e.Bounds.Y, _numberBoxWidth, e.Bounds.Height);
+                    // 绘制延迟底色
+                    e.Graphics.FillRectangle(numBoxBackBrush, _numberBoxX, e.Bounds.Y, _numberBoxWidth, e.Bounds.Height);
 
-                        // 绘制延迟字符串
-                        TextRenderer.DrawText(e.Graphics,
-                            item.Delay.ToString(),
-                            cbx.Font,
-                            new Point(_numberBoxX + _numberBoxWrap, e.Bounds.Y),
-                            Color.Black,
-                            TextFormatFlags.Left);
+                    // 绘制延迟字符串
+                    TextRenderer.DrawText(e.Graphics,
+                        item.Delay.ToString(),
+                        cbx.Font,
+                        new Point(_numberBoxX + _numberBoxWrap, e.Bounds.Y),
+                        Color.Black,
+                        TextFormatFlags.Left);
 
-                        break;
-                    }
-                case Models.Mode item:
-                    {
-                        // 绘制 模式Box 底色
-                        e.Graphics.FillRectangle(Brushes.Gray, _numberBoxX, e.Bounds.Y, _numberBoxWidth, e.Bounds.Height);
+                    break;
+                }
+                case Mode item:
+                {
+                    // 绘制 模式Box 底色
+                    e.Graphics.FillRectangle(Brushes.Gray, _numberBoxX, e.Bounds.Y, _numberBoxWidth, e.Bounds.Height);
 
-                        // 绘制 模式行数 字符串
-                        TextRenderer.DrawText(e.Graphics,
-                            item.Rule.Count.ToString(),
-                            cbx.Font,
-                            new Point(_numberBoxX + _numberBoxWrap, e.Bounds.Y),
-                            Color.Black,
-                            TextFormatFlags.Left);
+                    // 绘制 模式行数 字符串
+                    TextRenderer.DrawText(e.Graphics,
+                        item.Content.Count.ToString(),
+                        cbx.Font,
+                        new Point(_numberBoxX + _numberBoxWrap, e.Bounds.Y),
+                        Color.Black,
+                        TextFormatFlags.Left);
 
-                        break;
-                    }
+                    break;
+                }
             }
         }
 

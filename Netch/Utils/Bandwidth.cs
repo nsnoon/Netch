@@ -1,11 +1,14 @@
-﻿using Microsoft.Diagnostics.Tracing.Parsers;
-using Microsoft.Diagnostics.Tracing.Session;
-using Netch.Controllers;
-using Netch.Models;
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Diagnostics.Tracing.Parsers;
+using Microsoft.Diagnostics.Tracing.Session;
+using Microsoft.VisualStudio.Threading;
+using Netch.Controllers;
+using Netch.Models;
+using Serilog;
 
 namespace Netch.Utils
 {
@@ -50,74 +53,72 @@ namespace Netch.Utils
             var counterLock = new object();
             //int sent = 0;
 
-            //var processList = Process.GetProcessesByName(ProcessName).Select(p => p.Id).ToHashSet();
-            var instances = new List<Process>();
+            var processes = new List<Process>();
             switch (MainController.ServerController)
             {
                 case null:
                     break;
-                case Guard instanceController:
-                    if (instanceController.Instance != null)
-                        instances.Add(instanceController.Instance);
-
+                case Guard guard:
+                    processes.Add(guard.Instance);
                     break;
             }
 
-            if (!instances.Any())
+            if (!processes.Any())
                 switch (MainController.ModeController)
                 {
                     case null:
                         break;
-                    case NFController _:
-                        instances.Add(Process.GetCurrentProcess());
+                    case NFController or TUNController:
+                        processes.Add(Process.GetCurrentProcess());
                         break;
-                    case Guard instanceController:
-                        instances.Add(instanceController.Instance!);
+                    case Guard guard:
+                        processes.Add(guard.Instance);
                         break;
                 }
 
-            var processList = instances.Select(instance => instance.Id).ToList();
+            var pidHastSet = processes.Select(instance => instance.Id).ToHashSet();
 
-            Global.Logger.Info("流量统计进程:" + string.Join(",", instances.Select(instance => $"({instance.Id})" + instance.ProcessName).ToArray()));
+            Log.Information("流量统计进程: {Processes}", string.Join(',', processes.Select(v => $"({v.Id}){v.ProcessName}")));
 
             received = 0;
 
-            if (!instances.Any())
+            if (!processes.Any())
                 return;
 
             Global.MainForm.BandwidthState(true);
 
             Task.Run(() =>
-            {
-                tSession = new TraceEventSession("KernelAndClrEventsSession");
-                tSession.EnableKernelProvider(KernelTraceEventParser.Keywords.NetworkTCPIP);
-
-                //这玩意儿上传和下载得到的data是一样的:)
-                //所以暂时没办法区分上传下载流量
-                tSession.Source.Kernel.TcpIpRecv += data =>
                 {
-                    if (processList.Contains(data.ProcessID))
-                        lock (counterLock)
-                            received += (ulong)data.size;
+                    tSession = new TraceEventSession("KernelAndClrEventsSession");
+                    tSession.EnableKernelProvider(KernelTraceEventParser.Keywords.NetworkTCPIP);
 
-                    // Debug.WriteLine($"TcpIpRecv: {ToByteSize(data.size)}");
-                };
+                    //这玩意儿上传和下载得到的data是一样的:)
+                    //所以暂时没办法区分上传下载流量
+                    tSession.Source.Kernel.TcpIpRecv += data =>
+                    {
+                        if (pidHastSet.Contains(data.ProcessID))
+                            lock (counterLock)
+                                received += (ulong)data.size;
 
-                tSession.Source.Kernel.UdpIpRecv += data =>
-                {
-                    if (processList.Contains(data.ProcessID))
-                        lock (counterLock)
-                            received += (ulong)data.size;
+                        // Debug.WriteLine($"TcpIpRecv: {ToByteSize(data.size)}");
+                    };
 
-                    // Debug.WriteLine($"UdpIpRecv: {ToByteSize(data.size)}");
-                };
+                    tSession.Source.Kernel.UdpIpRecv += data =>
+                    {
+                        if (pidHastSet.Contains(data.ProcessID))
+                            lock (counterLock)
+                                received += (ulong)data.size;
 
-                tSession.Source.Process();
-            });
+                        // Debug.WriteLine($"UdpIpRecv: {ToByteSize(data.size)}");
+                    };
+
+                    tSession.Source.Process();
+                })
+                .Forget();
 
             while (Global.MainForm.State != State.Stopped)
             {
-                Task.Delay(1000).Wait();
+                Thread.Sleep(1000);
                 lock (counterLock)
                     Global.MainForm.OnBandwidthUpdated(received);
             }

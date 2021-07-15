@@ -1,11 +1,14 @@
-using Netch.Models;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
-using System.Timers;
-using Range = Netch.Models.Range;
+using Microsoft.VisualStudio.Threading;
+using Netch.Interfaces;
+using Netch.Models;
+using Timer = System.Timers.Timer;
 
 namespace Netch.Utils
 {
@@ -17,12 +20,7 @@ namespace Netch.Utils
                 .GetExportedTypes()
                 .Where(type => type.GetInterfaces().Contains(typeof(IServerUtil)));
 
-            ServerUtils = serversUtilsTypes.Select(t => (IServerUtil)Activator.CreateInstance(t)!).OrderBy(util => util.Priority);
-        }
-
-        public static Type GetTypeByTypeName(string typeName)
-        {
-            return ServerUtils.Single(i => i.TypeName.Equals(typeName)).ServerType;
+            ServerUtilDictionary = serversUtilsTypes.Select(t => (IServerUtil)Activator.CreateInstance(t)!).ToDictionary(util => util.TypeName);
         }
 
         #region Delay
@@ -30,9 +28,11 @@ namespace Netch.Utils
         public static class DelayTestHelper
         {
             private static readonly Timer Timer;
-            private static bool _mux;
+            private static readonly object TestAllLock = new();
 
-            public static readonly Range Range = new(0, int.MaxValue / 1000);
+            private static readonly SemaphoreSlim SemaphoreSlim = new(1, 16);
+
+            public static readonly NumberRange Range = new(0, int.MaxValue / 1000);
 
             static DelayTestHelper()
             {
@@ -42,7 +42,7 @@ namespace Netch.Utils
                     AutoReset = true
                 };
 
-                Timer.Elapsed += (_, _) => TestAllDelay();
+                Timer.Elapsed += (_, _) => TestAllDelayAsync().Forget();
             }
 
             public static bool Enabled
@@ -64,23 +64,35 @@ namespace Netch.Utils
                 return value != 0 && Range.InRange(value);
             }
 
-            public static event EventHandler? TestDelayFinished;
-
-            public static void TestAllDelay()
+            public static async Task TestAllDelayAsync()
             {
-                if (_mux)
+                if (!Monitor.TryEnter(TestAllLock))
                     return;
 
                 try
                 {
-                    _mux = true;
-                    Parallel.ForEach(Global.Settings.Server, new ParallelOptions { MaxDegreeOfParallelism = 16 }, server => { server.Test(); });
-                    _mux = false;
-                    TestDelayFinished?.Invoke(null, new EventArgs());
+                    var tasks = Global.Settings.Server.Select(async s =>
+                    {
+                        await SemaphoreSlim.WaitAsync();
+                        try
+                        {
+                            await s.PingAsync();
+                        }
+                        finally
+                        {
+                            SemaphoreSlim.Release();
+                        }
+                    });
+
+                    await Task.WhenAll(tasks);
                 }
                 catch (Exception)
                 {
                     // ignored
+                }
+                finally
+                {
+                    Monitor.Exit(TestAllLock);
                 }
             }
 
@@ -92,8 +104,9 @@ namespace Netch.Utils
                     return;
 
                 Timer.Interval = Global.Settings.DetectionTick * 1000;
-                Task.Run(TestAllDelay);
                 Timer.Start();
+
+                TestAllDelayAsync().Forget();
             }
         }
 
@@ -101,27 +114,21 @@ namespace Netch.Utils
 
         #region Handler
 
-        public static readonly IEnumerable<IServerUtil> ServerUtils;
+        public static Dictionary<string, IServerUtil> ServerUtilDictionary { get; set; }
 
         public static IServerUtil GetUtilByTypeName(string typeName)
         {
-            if (string.IsNullOrEmpty(typeName))
-                throw new ArgumentNullException();
-
-            return ServerUtils.Single(i => i.TypeName.Equals(typeName));
+            return ServerUtilDictionary[typeName];
         }
 
-        public static IServerUtil GetUtilByFullName(string fullName)
+        public static IServerUtil? GetUtilByUriScheme(string scheme)
         {
-            if (string.IsNullOrEmpty(fullName))
-                throw new ArgumentNullException();
-
-            return ServerUtils.Single(i => i.FullName.Equals(fullName));
+            return ServerUtilDictionary.Values.SingleOrDefault(i => i.UriScheme.Any(s => s.Equals(scheme)));
         }
 
-        public static IServerUtil? GetUtilByUriScheme(string typeName)
+        public static Type GetTypeByTypeName(string typeName)
         {
-            return ServerUtils.SingleOrDefault(i => i.UriScheme.Any(s => s.Equals(typeName)));
+            return GetUtilByTypeName(typeName).ServerType;
         }
 
         #endregion

@@ -72,5 +72,15 @@ namespace Netch.Utils
         {
             return value.Split(separator, StringSplitOptions.RemoveEmptyEntries);
         }
+
+        public static string? ValueOrDefault(this string? value, string? defaultValue = default)
+        {
+            return string.IsNullOrWhiteSpace(value) ? defaultValue : value;
+        }
+
+        public static string[]? SplitOrDefault(this string? value)
+        {
+            return !string.IsNullOrWhiteSpace(value) ? value.Split(',') : default;
+        }
     }
 }

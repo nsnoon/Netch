@@ -1,6 +1,4 @@
-﻿using Netch.Models.GitHubRelease;
-using Netch.Utils;
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
@@ -8,6 +6,9 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using Netch.Models.GitHubRelease;
+using Netch.Utils;
+using Serilog;
 
 namespace Netch.Controllers
 {
@@ -19,7 +20,7 @@ namespace Netch.Controllers
         public const string Name = @"Netch";
         public const string Copyright = @"Copyright © 2019 - 2021";
 
-        public const string AssemblyVersion = @"1.8.3";
+        public const string AssemblyVersion = @"1.8.7";
         private const string Suffix = @"";
 
         public static readonly string Version = $"{AssemblyVersion}{(string.IsNullOrEmpty(Suffix) ? "" : $"-{Suffix}")}";
@@ -36,48 +37,43 @@ namespace Netch.Controllers
 
         public static event EventHandler? NewVersionNotFound;
 
-        public static async Task Check(bool isPreRelease)
+        public static async Task CheckAsync(bool isPreRelease)
         {
             try
             {
                 var updater = new GitHubRelease(Owner, Repo);
                 var url = updater.AllReleaseUrl;
 
-                var json = await WebUtil.DownloadStringAsync(WebUtil.CreateRequest(url));
+                var (_, json) = await WebUtil.DownloadStringAsync(WebUtil.CreateRequest(url));
 
                 var releases = JsonSerializer.Deserialize<List<Release>>(json)!;
                 LatestRelease = GetLatestRelease(releases, isPreRelease);
-                Global.Logger.Info($"Github 最新发布版本: {LatestRelease.tag_name}");
+                Log.Information("Github 最新发布版本: {Version}", LatestRelease.tag_name);
                 if (VersionUtil.CompareVersion(LatestRelease.tag_name, Version) > 0)
                 {
-                    Global.Logger.Info("发现新版本");
-                    NewVersionFound?.Invoke(null, new EventArgs());
+                    Log.Information("发现新版本");
+                    NewVersionFound?.Invoke(null, EventArgs.Empty);
                 }
                 else
                 {
-                    Global.Logger.Info("目前是最新版本");
-                    NewVersionNotFound?.Invoke(null, new EventArgs());
+                    Log.Information("目前是最新版本");
+                    NewVersionNotFound?.Invoke(null, EventArgs.Empty);
                 }
             }
             catch (Exception e)
             {
                 if (e is WebException)
-                    Global.Logger.Warning($"获取新版本失败: {e.Message}");
+                    Log.Warning(e, "获取新版本失败");
                 else
-                    Global.Logger.Warning(e.ToString());
+                    Log.Error(e, "获取新版本异常");
 
-                NewVersionFoundFailed?.Invoke(null, new EventArgs());
+                NewVersionFoundFailed?.Invoke(null, EventArgs.Empty);
             }
         }
 
-        public static void GetLatestUpdateFileNameAndHash(out string fileName, out string sha256, string? keyword = null)
+        public static (string fileName, string sha256) GetLatestUpdateFileNameAndHash(string? keyword = null)
         {
-            fileName = string.Empty;
-            sha256 = string.Empty;
-
-            var matches = Regex.Matches(LatestRelease.body, @"^\| (?<filename>.*) \| (?<sha256>.*) \|\r?$", RegexOptions.Multiline)
-                .Cast<Match>()
-                .Skip(2);
+            var matches = Regex.Matches(LatestRelease.body, @"^\| (?<filename>.*) \| (?<sha256>.*) \|\r?$", RegexOptions.Multiline).Skip(2);
             /*
               Skip(2)
               
@@ -87,8 +83,7 @@ namespace Netch.Controllers
 
             Match match = keyword == null ? matches.First() : matches.First(m => m.Groups["filename"].Value.Contains(keyword));
 
-            fileName = match.Groups["filename"].Value;
-            sha256 = match.Groups["sha256"].Value;
+            return (match.Groups["filename"].Value, match.Groups["sha256"].Value);
         }
 
         public static string GetLatestReleaseContent()
@@ -105,7 +100,7 @@ namespace Netch.Controllers
             return sb.ToString();
         }
 
-        public static Release GetLatestRelease(IEnumerable<Release> releases, bool isPreRelease)
+        private static Release GetLatestRelease(IEnumerable<Release> releases, bool isPreRelease)
         {
             if (!isPreRelease)
                 releases = releases.Where(release => !release.prerelease);

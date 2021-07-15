@@ -1,30 +1,35 @@
-using Netch.Controllers;
-using Netch.Models;
 using System.Collections.Generic;
+using System.Net;
+using System.Threading.Tasks;
+using Netch.Controllers;
+using Netch.Interfaces;
+using Netch.Models;
 
 namespace Netch.Servers.ShadowsocksR
 {
     public class SSRController : Guard, IServerController
     {
-        public override string MainFile { get; protected set; } = "ShadowsocksR.exe";
+        public SSRController() : base("ShadowsocksR.exe")
+        {
+        }
 
-        protected override IEnumerable<string> StartedKeywords { get; set; } = new[] { "listening at" };
+        protected override IEnumerable<string> StartedKeywords => new[] { "listening at" };
 
-        protected override IEnumerable<string> StoppedKeywords { get; set; } = new[] { "Invalid config path", "usage" };
+        protected override IEnumerable<string> FailedKeywords => new[] { "Invalid config path", "usage" };
 
-        public override string Name { get; } = "ShadowsocksR";
+        public override string Name => "ShadowsocksR";
 
         public ushort? Socks5LocalPort { get; set; }
 
         public string? LocalAddress { get; set; }
 
-        public void Start(in Server s, in Mode mode)
+        public async Task<Socks5> StartAsync(Server s)
         {
             var server = (ShadowsocksR)s;
 
             var command = new SSRParameter
             {
-                s = server.AutoResolveHostname(),
+                s = await server.AutoResolveHostnameAsync(),
                 p = server.Port,
                 k = server.Password,
                 m = server.EncryptMethod,
@@ -38,7 +43,8 @@ namespace Netch.Servers.ShadowsocksR
                 u = true
             };
 
-            StartInstanceAuto(command.ToString());
+            await StartGuardAsync(command.ToString());
+            return new Socks5Bridge(IPAddress.Loopback.ToString(), this.Socks5LocalPort(),server.Hostname);
         }
 
         [Verb]
@@ -77,11 +83,6 @@ namespace Netch.Servers.ShadowsocksR
             [Quote]
             [Optional]
             public string? acl { get; set; }
-        }
-
-        public override void Stop()
-        {
-            StopInstance();
         }
     }
 }
